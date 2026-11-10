@@ -3165,11 +3165,17 @@ function resumeLive() {
 /* Telegram */
 const tgQ: string[] = [];
 let tgBusy = false;
+let tgLastStatus: { ok: boolean; status?: number; error?: string; at?: string } = { ok: true };
+let tgCooldownUntil = 0;
+
 function tg(text: string) {
   const token = tgToken();
   const chat = tgChat();
   if (!token || !chat) {
-    console.warn(`[Telegram] Сообщение не отправлено: ${!token ? 'токен не задан' : ''} ${!chat ? 'канал не задан' : ''}`);
+    return;
+  }
+  // Если Telegram вернул 403 (бот не админ канала), соблюдаем кулдаун, чтобы не спамить
+  if (Date.now() < tgCooldownUntil) {
     return;
   }
   tgQ.push(text);
@@ -3180,6 +3186,10 @@ async function tgPump() {
   if (tgBusy) return;
   tgBusy = true;
   while (tgQ.length) {
+    if (Date.now() < tgCooldownUntil) {
+      tgQ.length = 0;
+      break;
+    }
     const t = tgQ.shift()!;
     const token = tgToken();
     const chat = tgChat();
@@ -3204,9 +3214,39 @@ async function tgPump() {
         await sleep(retryAfter * 1000);
         continue;
       }
+      if (r.status === 403) {
+        const errText = await r.text();
+        let desc = 'Forbidden: bot is not a member of the channel chat';
+        try {
+          const parsed = JSON.parse(errText);
+          if (parsed.description) desc = parsed.description;
+        } catch (e) {}
+        tgLastStatus = {
+          ok: false,
+          status: 403,
+          error: desc,
+          at: new Date().toISOString()
+        };
+        // Устанавливаем кулдаун на 60 секунд и сбрасываем накопившуюся очередь
+        tgCooldownUntil = Date.now() + 60000;
+        tgQ.length = 0;
+        console.warn(`[Telegram] Бот не может отправлять сообщения в ${chat} (${desc}). Чтобы включить трансляцию, добавьте бота в администраторы канала с правом публикации сообщений.`);
+        break;
+      }
       if (!r.ok) {
         const errText = await r.text();
-        console.error(`[Telegram Error ${r.status}]:`, errText);
+        let desc = errText;
+        try {
+          const parsed = JSON.parse(errText);
+          if (parsed.description) desc = parsed.description;
+        } catch (e) {}
+        tgLastStatus = {
+          ok: false,
+          status: r.status,
+          error: desc,
+          at: new Date().toISOString()
+        };
+        console.warn(`[Telegram Warning ${r.status}]: ${desc}`);
         if (errText.includes("can't parse entities")) {
           const plain = t.replace(/<[^>]+>/g, '');
           await fetch(url, {
@@ -3217,11 +3257,13 @@ async function tgPump() {
               text: plain,
               disable_web_page_preview: true
             })
-          }).catch(e => console.error('[Telegram Plaintext Retry Error]:', e.message));
+          }).catch(e => console.warn('[Telegram Plaintext Retry]:', e.message));
         }
+      } else {
+        tgLastStatus = { ok: true, at: new Date().toISOString() };
       }
     } catch (err: any) {
-      console.error('[Telegram Network Error]:', err.message);
+      console.warn('[Telegram Network Notice]:', err.message);
     }
     await sleep(350);
   }
@@ -6693,6 +6735,7 @@ app.get('/api/admin/overview', admin, (req, res) => {
       adminCode: db.settings.adminCode,
       systemPrompt: db.settings.systemPrompt || SYS_DEFAULT
     },
+    telegramStatus: tgLastStatus,
     keys: {
       gemini: !!(getGeminiKeys().length),
       geminiCount: getGeminiKeys().length,
@@ -6733,8 +6776,16 @@ app.get('/api/admin/overview', admin, (req, res) => {
 app.post('/api/admin/settings', admin, (req, res) => {
   const b = req.body, s = db.settings;
   for (const k of ['season', 'siteUrl']) if (typeof b[k] === 'string') s[k] = b[k].trim();
-  if (typeof b.tgChat === 'string') s.tgChat = normalizeTgChat(b.tgChat);
-  if (typeof b.tgToken === 'string' && !b.tgToken.includes('•')) s.tgToken = b.tgToken.trim();
+  if (typeof b.tgChat === 'string') {
+    s.tgChat = normalizeTgChat(b.tgChat);
+    tgCooldownUntil = 0;
+    tgLastStatus = { ok: true };
+  }
+  if (typeof b.tgToken === 'string' && !b.tgToken.includes('•')) {
+    s.tgToken = b.tgToken.trim();
+    tgCooldownUntil = 0;
+    tgLastStatus = { ok: true };
+  }
   for (const k of ['secPerMin', 'breakSec', 'squadMax', 'maxAiCalls', 'aiParallel']) if (b[k] !== undefined && +b[k] > 0) s[k] = +b[k];
   if (b.aiLeadSec !== undefined && +b.aiLeadSec >= 0) s.aiLeadSec = Math.min(900, +b.aiLeadSec);
   if (b.chunks !== undefined) s.chunks = +b.chunks === 6 ? 6 : 2;
@@ -6770,6 +6821,9 @@ app.post('/api/admin/telegram/test', admin, async (req: any, res) => {
     return fail(res, 'Имя или ID канала не указаны. Введите @имя_канала или числовой ID');
   }
 
+  // Сбрасываем кулдаун при ручном тестировании
+  tgCooldownUntil = 0;
+
   try {
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const resp = await fetch(url, {
@@ -6786,15 +6840,21 @@ app.post('/api/admin/telegram/test', admin, async (req: any, res) => {
     if (!resp.ok || !data.ok) {
       const desc = data.description || `HTTP ${resp.status}`;
       let hint = '';
-      if (desc.includes('chat not found')) {
+      if (resp.status === 403 || desc.includes('not a member') || desc.includes('Forbidden') || desc.includes('administrator')) {
+        hint = ` Бот @RPLVIRT_bot не добавлен в администраторы канала ${chat}. Перейдите в Telegram, откройте канал ${chat} → Управление каналом → Администраторы → Добавить администратора → найдите @RPLVIRT_bot и выдайте право «Публикация сообщений».`;
+        tgLastStatus = { ok: false, status: 403, error: desc, at: new Date().toISOString() };
+      } else if (desc.includes('chat not found')) {
         hint = ' Проверьте правильность названия канала и обязательно добавьте бота в администраторы канала с правом публикации сообщений.';
+        tgLastStatus = { ok: false, status: 400, error: desc, at: new Date().toISOString() };
       } else if (desc.includes('Unauthorized') || desc.includes('Not Found')) {
         hint = ' Проверьте правильность токена бота Telegram.';
+        tgLastStatus = { ok: false, status: 401, error: desc, at: new Date().toISOString() };
       } else if (desc.includes("can't parse entities")) {
         hint = ' Ошибка парсинга разметки.';
       }
       return fail(res, `Ошибка Telegram: ${desc}.${hint}`);
     }
+    tgLastStatus = { ok: true, at: new Date().toISOString() };
     return res.json({ ok: 1, message: `Тестовое сообщение успешно отправлено в Telegram-канал ${chat}!` });
   } catch (err: any) {
     return fail(res, `Сетевая ошибка при отправке в Telegram: ${err.message}`);

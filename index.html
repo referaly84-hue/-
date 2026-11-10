@@ -7551,6 +7551,13 @@ async function pgAdmin(app) {
       <button type="button" class="btn alt sm" id="tg_test_btn">🔔 Проверить отправку в Telegram</button>
     </div>
     <div id="tg_test_res" style="margin-top:8px" hidden></div>
+    ${ov.telegramStatus && !ov.telegramStatus.ok ? `
+      <div style="background:#fef2f2;border:1px solid #f87171;color:#991b1b;padding:12px 14px;border-radius:8px;margin-top:10px;font-size:13px;line-height:1.5">
+        <b>⚠️ Статус Telegram: Бот не добавлен в администраторы канала!</b><br/>
+        Ответ Telegram: <i>${e(ov.telegramStatus.error || 'Forbidden: bot is not a member of the channel chat')}</i>.<br/>
+        <b>Как исправить:</b> Откройте канал <b>${e(s.tgChat || '@matchsmotr')}</b> в Telegram → <i>Управление каналом</i> → <i>Администраторы</i> → <i>Добавить администратора</i> → найдите бота <b>@RPLVIRT_bot</b> и выдайте ему разрешение <b>«Публикация сообщений»</b>.
+      </div>
+    ` : ''}
     <label style="margin-top:10px">Адрес сайта (для ссылок в Telegram)</label><input id="url" value="${e(s.siteUrl)}" placeholder="https://mysite.ru"></div>
     <div class="panel"><h3>Игра</h3><div class="row"><div style="flex:1;min-width:200px"><label>Максимум игроков в заявке</label><input id="sqm" type="number" value="${s.squadMax}"></div><div style="flex:1;min-width:200px"><label>Запросов на матч</label><select id="chk"><option value="2" ${s.chunks != 6 ? 'selected' : ''}>2 (по таймам)</option><option value="6" ${s.chunks == 6 ? 'selected' : ''}>6 (по 15 минут)</option></select></div></div>
     <label style="margin-top:8px"><input type="checkbox" id="auto" ${s.auto ? 'checked' : ''} style="width:auto"> Автозапуск матчей по расписанию</label></div>
